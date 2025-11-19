@@ -24,7 +24,7 @@ from typing import List, Dict, Optional, Tuple
 from bs4 import BeautifulSoup
 from PIL import Image
 from cachetools import cached, TTLCache
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ==============================================================================
 # 缓存配置
