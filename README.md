@@ -128,6 +128,33 @@ Headers: {
 - 获取首页第一页: `/`
 - 翻页: `/?next=3645194`
 
+**返回示例**:
+```json
+{
+  "success": true,
+  "keyword": "language:chinese",
+  "galleries": [
+    {
+      "gid": 3645215,
+      "token": "4db836130d",
+      "url": "https://e-hentai.org/g/3645215/4db836130d/",
+      "title": "[Chinese] 画廊标题",
+      "thumbnail": "https://ehgt.org/xx/xxxxxxxx.jpg",
+      "thumbnail_proxy": "/image/proxy?url=https://ehgt.org/xx/xxxxxxxx.jpg&w=200&q=40",
+      "posted": "2025-11-19 12:34",
+      "category": "Doujinshi",
+      "rating": 4.5,
+      "uploader": "some_user",
+      "pages": 25
+    }
+  ],
+  "pagination": {
+    "has_next": true,
+    "next_id": "3644809"
+  }
+}
+```
+
 #### 1.2 搜索
 
 **必选参数**:
@@ -142,6 +169,34 @@ Headers: {
 - 搜索第一页: `/search?q=language:chinese`
 - 搜索翻页: `/search?q=language:chinese&next=3644809`
 
+
+**返回示例**:
+```json
+{
+  "success": true,
+  "keyword": "language:chinese",
+  "galleries": [
+    {
+      "gid": 3645215,
+      "token": "4db836130d",
+      "url": "https://e-hentai.org/g/3645215/4db836130d/",
+      "title": "[Chinese] 画廊标题",
+      "thumbnail": "https://ehgt.org/xx/xxxxxxxx.jpg",
+      "thumbnail_proxy": "/image/proxy?url=https://ehgt.org/xx/xxxxxxxx.jpg&w=200&q=40",
+      "posted": "2025-11-19 12:34",
+      "category": "Doujinshi",
+      "rating": 4.5,
+      "uploader": "some_user",
+      "pages": 25
+    }
+  ],
+  "pagination": {
+    "has_next": true,
+    "next_id": "3644809"
+  }
+}
+```
+
 ### 2. 获取画廊详情
 
 **必选参数**:
@@ -151,6 +206,30 @@ Headers: {
 **接口地址**: `/gallery/<gid>/<token>`
 
 **调用例子**: `/gallery/3645215/4db836130d`
+
+**返回示例**:
+```json
+{
+  "success": true,
+  "gallery": {
+    "gid": 3645215,
+    "token": "4db836130d",
+    "title": "[Chinese] 画廊标题",
+    "title_jp": "[日本語] 画廊日文标题",
+    "category": "Doujinshi",
+    "thumbnail": "https://ehgt.org/xx/xxxxxxxx.jpg",
+    "thumbnail_proxy": "/image/proxy?url=https://ehgt.org/xx/xxxxxxxx.jpg&w=200&q=40",
+    "rating": 4.5,
+    "pages": 25,
+    "tags": {
+      "language": ["chinese", "translated"],
+      "artist": ["artist_name"],
+      "female": ["big breasts", "sole female"],
+      "male": ["sole male"]
+    }
+  }
+}
+```
 
 ### 3. 获取画廊图片列表
 
@@ -168,6 +247,31 @@ Headers: {
 **调用例子**:
 - 获取第一页图片: `/gallery/3645215/4db836130d/images`
 - 获取第二页图片: `/gallery/3645215/4db836130d/images?page=1`
+
+**返回示例**:
+```json
+{
+  "success": true,
+  "gid": 3645215,
+  "token": "4db836130d",
+  "page": 1,
+  "count": 5,
+  "images": [
+    {
+      "index": 0,
+      "absolute_index": 20,
+      "thumbnail_jpg": "/image/proxy?url=...&crop_x=...",
+      "image_jpg": "/image/proxy?url=..."
+    },
+    {
+      "index": 1,
+      "absolute_index": 21,
+      "thumbnail_jpg": "/image/proxy?url=...&crop_x=...",
+      "image_jpg": "/image/proxy?url=..."
+    }
+  ]
+}
+```
 
 ### 4. 图片代理服务
 
@@ -187,6 +291,11 @@ Headers: {
 - 代理大图: `/image/proxy?url=https://.../image.webp`
 - 代理并切割缩略图: `/image/proxy?url=https://.../sprite.webp&crop_x=200&crop_y=0&crop_w=200&crop_h=282&w=200&q=40`
 
+**返回内容**:
+- **成功**: 返回 `Content-Type: image/jpeg` 的图片二进制数据。
+- **失败**: 返回 `Content-Type: application/json` 的错误信息，例如 `{"error": "无法下载或处理图片"}`。
+
+
 ### 5. 健康检查
 
 **说明**: 用于检查 API 服务是否在线 。
@@ -196,6 +305,14 @@ Headers: {
 **接口地址**: `/health`
 
 **调用例子**: `/health`
+
+**返回示例**:
+```json
+{
+  "status": "ok",
+  "client_cookie_provided": true
+}
+```
 
 ---
 
