@@ -338,8 +338,8 @@ def get_processed_image_data(url: str, headers: tuple, max_width: int, quality: 
 # ==============================================================================
 app = Flask(__name__)
 app.json.ensure_ascii = False
-REQUEST_TIMEOUT = 20; DEFAULT_PROXY_WIDTH = 600; DEFAULT_PROXY_QUALITY = 45
-THUMBNAIL_PROXY_WIDTH = 120; THUMBNAIL_PROXY_QUALITY = 30
+REQUEST_TIMEOUT = 20; DEFAULT_PROXY_WIDTH = 600; DEFAULT_PROXY_QUALITY = 50
+THUMBNAIL_PROXY_WIDTH = 150; THUMBNAIL_PROXY_QUALITY = 40
 MAX_CONCURRENT_REQUESTS = 10
 
 def get_request_context() -> tuple:
