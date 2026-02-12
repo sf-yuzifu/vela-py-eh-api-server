@@ -32,6 +32,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 list_cache = TTLCache(maxsize=100, ttl=300 )
 gallery_cache = TTLCache(maxsize=500, ttl=3600)
 image_proxy_cache = TTLCache(maxsize=1000, ttl=86400)
+pagination_cache = TTLCache(maxsize=200, ttl=600)
+
+import sys
+sys.stdout.reconfigure(encoding="utf-8")
 
 # ==============================================================================
 # 模块 1: E-Hentai HTML 解析器 (EhParser)
@@ -141,10 +145,19 @@ class EhParser:
             if rating_elem:
                 rating_text = rating_elem.get_text(strip=True); rating_match = re.search(r'([\d.]+)', rating_text)
                 if rating_match: detail['rating'] = float(rating_match.group(1))
-            pages_elem = soup.select_one('#gdd tr:nth-of-type(4) td.gdt2')
-            if pages_elem:
-                pages_text = pages_elem.get_text(strip=True); pages_match = re.search(r'(\d+)', pages_text)
-                if pages_match: detail['pages'] = int(pages_match.group(1))
+            
+            gdd_rows = soup.select('#gdd tr')
+            for row in gdd_rows:
+                label_elem = row.select_one('td.gdt1')
+                value_elem = row.select_one('td.gdt2')
+                if label_elem and value_elem:
+                    label_text = label_elem.get_text(strip=True)
+                    if 'Length:' in label_text or 'length:' in label_text.lower():
+                        pages_text = value_elem.get_text(strip=True)
+                        pages_match = re.search(r'(\d+)', pages_text)
+                        if pages_match:
+                            detail['pages'] = int(pages_match.group(1))
+                            break
         except Exception as e: logging.error(f"解析画廊详情时出错: {e}")
         
         # 如果最终字典为空，记录日志
@@ -315,7 +328,7 @@ def get_gallery_images_data(gid: int, token: str, page: int, headers: tuple, url
                 if image_url:
                     crop_info = f"&crop_x={original_item['crop_x']}&crop_y={original_item['crop_y']}&crop_w={original_item['crop_w']}&crop_h={original_item['crop_h']}"
                     thumbnail_proxy_url = f"/image/proxy?url={original_item['thumbnail_url']}{crop_info}&w={THUMBNAIL_PROXY_WIDTH}&q={THUMBNAIL_PROXY_QUALITY}"
-                    final_images[index] = {'index': index, 'thumbnail_jpg': thumbnail_proxy_url, 'image_jpg': f"/image/proxy?url={image_url}"}
+                    final_images[index] = {'index': index, 'thumbnail_jpg': thumbnail_proxy_url, 'image_jpg': f"/image/proxy?url={image_url}&width={DEFAULT_PROXY_WIDTH}&quality={DEFAULT_PROXY_QUALITY}"}
             except Exception as exc: logging.error(f"并发任务生成异常: {exc}")
     return [img for img in final_images if img is not None]
 
@@ -338,17 +351,67 @@ def get_processed_image_data(url: str, headers: tuple, max_width: int, quality: 
 # ==============================================================================
 app = Flask(__name__)
 app.json.ensure_ascii = False
+app.debug = False
 REQUEST_TIMEOUT = 20; DEFAULT_PROXY_WIDTH = 400; DEFAULT_PROXY_QUALITY = 50
 THUMBNAIL_PROXY_WIDTH = 150; THUMBNAIL_PROXY_QUALITY = 40
 MAX_CONCURRENT_REQUESTS = 10
 
+def parse_user_agent(user_agent: str) -> dict:
+    device_info = {'product': '', 'brand': '', 'os_type': '', 'os_version': ''}
+    try:
+        if not user_agent:
+            return device_info
+        
+        parts = user_agent.split('/')
+        if len(parts) >= 5:
+            device_info['product'] = parts[1] if len(parts) > 1 else ''
+            device_info['brand'] = parts[2] if len(parts) > 2 else ''
+            device_info['os_type'] = parts[3] if len(parts) > 3 else ''
+            device_info['os_version'] = parts[4] if len(parts) > 4 else ''
+    except Exception as e:
+        logging.warning(f"解析 User-Agent 失败: {e}")
+    
+    return device_info
+
+def parse_id(id_str: str) -> tuple:
+    try:
+        if '_' in id_str:
+            parts = id_str.split('_')
+            if len(parts) == 2:
+                return int(parts[0]), parts[1]
+        return None, None
+    except Exception as e:
+        logging.warning(f"解析 ID 失败: {e}")
+        return None, None
+
+def get_image_params_for_device(device_info: dict) -> tuple:
+    default_width = DEFAULT_PROXY_WIDTH
+    default_quality = DEFAULT_PROXY_QUALITY
+    
+    product = device_info.get('product', '').lower()
+    brand = device_info.get('brand', '').lower()
+    
+    if 'band' in product or 'watch' in product or brand in ['xiaomi', 'huawei', 'oppo', 'vivo']:
+        default_width = 300
+        default_quality = 40
+    elif 'phone' in product or 'mobile' in product:
+        default_width = 400
+        default_quality = 50
+    
+    return default_width, default_quality
+
 def get_request_context() -> tuple:
-    client_cookie = request.headers.get('X-EH-Cookie')
+    client_cookie = request.headers.get('Cookie')
     use_exhentai = bool(client_cookie and 'igneous=EX' in client_cookie)
     url_builder = EhUrlBuilder(use_exhentai=use_exhentai)
+    
+    user_agent = request.headers.get('User-Agent', '')
+    device_info = parse_user_agent(user_agent)
+    default_width, default_quality = get_image_params_for_device(device_info)
+    
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/119.0.0.0 Safari/537.36', 'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7', 'Accept-Language': 'en-US,en;q=0.9', 'Referer': url_builder.get_referer()}
     if client_cookie: headers['Cookie'] = client_cookie
-    return headers, url_builder
+    return headers, url_builder, default_width, default_quality
 
 def fetch_page_for_request(url: str, headers: dict) -> Optional[str]:
     try:
@@ -362,14 +425,187 @@ def fetch_page_for_request(url: str, headers: dict) -> Optional[str]:
 @app.route('/test')
 def test_page():
     html_content = """
-    <!DOCTYPE html><html lang="zh-CN"><head><meta charset="UTF-8"><title>E-Hentai API 测试器</title><style>body{font-family:sans-serif;line-height:1.6;margin:20px}h2,h3{border-bottom:1px solid #ccc;padding-bottom:5px}form{margin-bottom:20px;padding:10px;border:1px solid #eee}input,button,textarea{padding:8px;margin-right:10px}pre{background-color:#f4f4f4;padding:15px;border-radius:5px;white-space:pre-wrap;word-wrap:break-word}.container{max-width:1000px;margin:auto}#pagination{margin-top:10px}</style></head><body><div class="container"><h1>E-Hentai API 测试器</h1><form id="cookieForm"><h3>1. 设置 Cookie (可选)</h3><textarea id="cookieInput" rows="3" cols="80" placeholder="例如：igneous=xxx; ipb_member_id=12345; ..."></textarea></form><form id="homeForm"><h3>2. 获取首页画廊</h3><button type="submit">获取首页</button></form><form id="searchForm"><h3>3. 搜索画廊</h3><label>关键词: <input type="text" id="searchKeyword" value="language:chinese"></label><button type="submit">搜索</button></form><div id="pagination"><button id="nextPageBtn" style="display:none;">下一页</button></div><hr><form id="detailForm"><h3>4. 获取画廊详情和图片列表</h3><label>画廊 URL 或 GID/Token: <input type="text" id="galleryUrl" size="50" placeholder="例如: https://e-hentai.org/g/gid/token/ 或 gid/token"></label><button type="button" id="getDetailBtn">获取详情</button><button type="button" id="getImagesBtn">获取图片列表</button></form><h3>结果输出:</h3><pre id="output">这里将显示 API 的 JSON 响应...</pre></div><script>const cookieInput=document.getElementById("cookieInput" ),output=document.getElementById("output"),nextPageBtn=document.getElementById("nextPageBtn");let currentNextId=null,currentEndpoint=null,currentKeyword=null;cookieInput.value=localStorage.getItem("ehCookie")||"",cookieInput.addEventListener("input",()=>{localStorage.setItem("ehCookie",cookieInput.value)});async function callApi(e,t=!1){const o=cookieInput.value;output.textContent="正在请求... (此过程可能需要一些时间)";try{const n={};o&&(n["X-EH-Cookie"]=o);const c=await fetch(e,{headers:n}),a=await c.json();if(output.textContent=JSON.stringify(a,null,2),a.success&&a.pagination){const e=a.pagination;e.has_next&&e.next_id?(currentNextId=e.next_id,nextPageBtn.style.display="inline-block"):(currentNextId=null,nextPageBtn.style.display="none")}else nextPageBtn.style.display="none";t&&(currentEndpoint=e.split("?")[0],currentKeyword=new URLSearchParams(e.split("?")[1]).get("q"))}catch(e){output.textContent="请求失败: "+e.message}}document.getElementById("homeForm").addEventListener("submit",e=>{e.preventDefault(),callApi("/",!0)}),document.getElementById("searchForm").addEventListener("submit",e=>{e.preventDefault();const t=document.getElementById("searchKeyword").value;callApi(`/search?q=${encodeURIComponent(t)}`,!0)}),nextPageBtn.addEventListener("click",()=>{if(!currentNextId||!currentEndpoint)return;let e=currentEndpoint;e+="?next="+currentNextId,"/search"===currentEndpoint&&currentKeyword&&(e+="&q="+encodeURIComponent(currentKeyword)),callApi(e)});function getGidToken(){const e=document.getElementById("galleryUrl").value.match(/(\\d+)\\/([a-f0-9]{10})/);return e?{gid:e[1],token:e[2]}:(alert("无效的画廊 URL 或 GID/Token 格式！\\n应为: https://.../g/gid/token/ 或 gid/token" ),null)}document.getElementById("getDetailBtn").addEventListener("click",()=>{const e=getGidToken();e&&callApi(`/gallery/${e.gid}/${e.token}`)}),document.getElementById("getImagesBtn").addEventListener("click",()=>{const e=getGidToken();e&&callApi(`/gallery/${e.gid}/${e.token}/images`)});</script></body></html>
+    <!DOCTYPE html>
+    <html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8">
+        <title>E-Hentai API 测试器</title>
+        <style>
+            body{font-family:sans-serif;line-height:1.6;margin:20px;max-width:1200px;margin:0 auto;padding:20px}
+            h1,h2,h3{border-bottom:1px solid #ccc;padding-bottom:5px}
+            form{margin-bottom:20px;padding:15px;border:1px solid #eee;border-radius:5px;background:#f9f9f9}
+            input,button,textarea{padding:8px;margin-right:10px;border:1px solid #ddd;border-radius:4px}
+            button{background:#007bff;color:white;border:none;cursor:pointer}
+            button:hover{background:#0056b3}
+            button:disabled{background:#ccc;cursor:not-allowed}
+            pre{background-color:#f4f4f4;padding:15px;border-radius:5px;white-space:pre-wrap;word-wrap:break-word;max-height:600px;overflow-y:auto}
+            .container{max-width:1200px;margin:auto}
+            .form-group{margin-bottom:10px}
+            label{display:inline-block;margin-right:10px}
+            .pagination{margin-top:10px;display:flex;gap:10px;align-items:center}
+            .page-info{padding:5px 10px;background:#e9ecef;border-radius:4px}
+            .config-output{background:#e7f3ff;padding:10px;border-radius:5px;margin-bottom:20px;font-family:monospace}
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>🧪 E-Hentai API 测试器</h1>
+            
+            <form id="cookieForm">
+                <h3>1. 设置 Cookie (可选)</h3>
+                <textarea id="cookieInput" rows="2" style="width:100%" placeholder="例如：igneous=xxx; ipb_member_id=12345; ..."></textarea>
+            </form>
+            
+            <form id="configForm">
+                <h3>2. 获取漫画源配置</h3>
+                <button type="submit">获取配置</button>
+            </form>
+            
+            <form id="searchForm">
+                <h3>3. 搜索漫画</h3>
+                <div class="form-group">
+                    <label>关键词: <input type="text" id="searchKeyword" value="language:chinese" style="width:300px"></label>
+                    <label>页数: <input type="number" id="searchPage" value="1" min="1" style="width:80px"></label>
+                    <button type="submit">搜索</button>
+                </div>
+            </form>
+            
+            <div class="pagination" id="searchPagination" style="display:none;">
+                <button id="prevPageBtn">上一页</button>
+                <span class="page-info" id="pageInfo">第 1 页</span>
+                <button id="nextPageBtn">下一页</button>
+            </div>
+            
+            <hr>
+            
+            <form id="detailForm">
+                <h3>4. 获取漫画详情和图片</h3>
+                <div class="form-group">
+                    <label>ID (gid_token): <input type="text" id="comicId" size="40" placeholder="例如: 3645215_4db836130d"></label>
+                </div>
+                <div class="form-group">
+                    <button type="button" id="getDetailBtn">获取详情</button>
+                    <button type="button" id="getImagesBtn">获取图片</button>
+                    <label>章节: <input type="number" id="chapterNum" value="0" min="0" style="width:80px"></label>
+                </div>
+            </form>
+            
+            <h3>📋 结果输出:</h3>
+            <pre id="output">这里将显示 API 的 JSON 响应...</pre>
+        </div>
+        
+        <script>
+            const cookieInput = document.getElementById("cookieInput");
+            const output = document.getElementById("output");
+            const searchPage = document.getElementById("searchPage");
+            const searchPagination = document.getElementById("searchPagination");
+            const pageInfo = document.getElementById("pageInfo");
+            const prevPageBtn = document.getElementById("prevPageBtn");
+            const nextPageBtn = document.getElementById("nextPageBtn");
+            const comicIdInput = document.getElementById("comicId");
+            const chapterNum = document.getElementById("chapterNum");
+            
+            let currentKeyword = "";
+            let currentHasMore = false;
+            
+            cookieInput.value = localStorage.getItem("ehCookie") || "";
+            cookieInput.addEventListener("input", () => {
+                localStorage.setItem("ehCookie", cookieInput.value);
+            });
+            
+            async function callApi(url, updatePagination = false) {
+                const cookie = cookieInput.value;
+                output.textContent = "⏳ 正在请求...";
+                
+                try {
+                    const headers = {};
+                    if (cookie) headers["Cookie"] = cookie;
+                    
+                    const response = await fetch(url, { headers });
+                    const data = await response.json();
+                    
+                    output.textContent = JSON.stringify(data, null, 2);
+                    
+                    if (updatePagination && data.results) {
+                        currentKeyword = document.getElementById("searchKeyword").value;
+                        currentHasMore = data.has_more;
+                        const page = data.page;
+                        
+                        searchPage.value = page;
+                        pageInfo.textContent = `第 ${page} 页`;
+                        prevPageBtn.disabled = page <= 1;
+                        nextPageBtn.disabled = !currentHasMore;
+                        searchPagination.style.display = "flex";
+                    }
+                    
+                    if (data.comic_id) {
+                        comicIdInput.value = data.comic_id;
+                    }
+                    
+                    if (data.item_id) {
+                        comicIdInput.value = data.item_id;
+                    }
+                } catch (e) {
+                    output.textContent = "❌ 请求失败: " + e.message;
+                }
+            }
+            
+            document.getElementById("configForm").addEventListener("submit", (e) => {
+                e.preventDefault();
+                callApi("/config");
+            });
+            
+            document.getElementById("searchForm").addEventListener("submit", (e) => {
+                e.preventDefault();
+                const keyword = document.getElementById("searchKeyword").value;
+                const page = searchPage.value;
+                callApi(`/search?q=${encodeURIComponent(keyword)}&page=${page}`, true);
+            });
+            
+            prevPageBtn.addEventListener("click", () => {
+                const page = parseInt(searchPage.value);
+                if (page > 1) {
+                    searchPage.value = page - 1;
+                    callApi(`/search?q=${encodeURIComponent(currentKeyword)}&page=${page - 1}`, true);
+                }
+            });
+            
+            nextPageBtn.addEventListener("click", () => {
+                const page = parseInt(searchPage.value);
+                if (currentHasMore) {
+                    searchPage.value = page + 1;
+                    callApi(`/search?q=${encodeURIComponent(currentKeyword)}&page=${page + 1}`, true);
+                }
+            });
+            
+            document.getElementById("getDetailBtn").addEventListener("click", () => {
+                const id = comicIdInput.value.trim();
+                if (!id) {
+                    alert("请输入漫画 ID (格式: gid_token)");
+                    return;
+                }
+                callApi(`/comic/${id}`);
+            });
+            
+            document.getElementById("getImagesBtn").addEventListener("click", () => {
+                const id = comicIdInput.value.trim();
+                const chapter = chapterNum.value;
+                if (!id) {
+                    alert("请输入漫画 ID (格式: gid_token)");
+                    return;
+                }
+                callApi(`/photo/${id}/${chapter}`);
+            });
+        </script>
+    </body>
+    </html>
     """
     return render_template_string(html_content)
 
 @app.route('/')
 def home():
     try:
-        headers, url_builder = get_request_context()
+        headers, url_builder, default_width, default_quality = get_request_context()
         next_id = request.args.get('next')
         url = url_builder.build_home_url(next_id=next_id)
         result = get_gallery_list_data(url, tuple(headers.items()))
@@ -382,46 +618,139 @@ def home():
 @app.route('/search')
 def search():
     try:
-        headers, url_builder = get_request_context()
-        keyword = request.args.get('q'); next_id = request.args.get('next')
-        if not next_id and not keyword: return jsonify({'error': '缺少搜索关键词参数 q'}), 400
+        headers, url_builder, default_width, default_quality = get_request_context()
+        keyword = request.args.get('q', '')
+        page = int(request.args.get('page', 1))
+        
+        if not keyword: return jsonify({'error': '缺少搜索关键词参数 q'}), 400
+        
+        cache_key = f"search_{keyword}"
+        next_id = None
+        
+        if page > 1:
+            next_id = pagination_cache.get(f"{cache_key}_{page - 1}")
+            if not next_id:
+                for p in range(1, page):
+                    prev_next_id = pagination_cache.get(f"{cache_key}_{p - 1}") if p > 1 else None
+                    temp_url = url_builder.build_search_url(keyword=keyword, next_id=prev_next_id)
+                    temp_result = get_gallery_list_data(temp_url, tuple(headers.items()))
+                    if not temp_result:
+                        return jsonify({'error': f'无法获取第 {p} 页数据'}), 500
+                    
+                    temp_next_id = temp_result.get('pagination', {}).get('next_id')
+                    if temp_next_id:
+                        pagination_cache[f"{cache_key}_{p}"] = temp_next_id
+                    else:
+                        return jsonify({'error': f'第 {p} 页后没有更多数据'}), 404
+                
+                next_id = pagination_cache.get(f"{cache_key}_{page - 1}")
+        
         url = url_builder.build_search_url(keyword=keyword, next_id=next_id)
         result = get_gallery_list_data(url, tuple(headers.items()))
         if not result: return jsonify({'error': '无法获取搜索结果'}), 500
+        
+        current_next_id = result.get('pagination', {}).get('next_id')
+        if current_next_id:
+            pagination_cache[f"{cache_key}_{page}"] = current_next_id
+        
+        results = []
+        api_url = request.host_url.rstrip("/")
         for gallery in result.get('galleries', []):
-            if 'thumbnail' in gallery and gallery['thumbnail']: gallery['thumbnail_proxy'] = f"/image/proxy?url={gallery['thumbnail']}&w={THUMBNAIL_PROXY_WIDTH}&q={THUMBNAIL_PROXY_QUALITY}"
-        return jsonify({'success': True, 'keyword': keyword, **result})
+            if 'thumbnail' in gallery and gallery['thumbnail']: 
+                gallery['thumbnail_proxy'] = f"{api_url}/image/proxy?url={gallery['thumbnail']}&w={THUMBNAIL_PROXY_WIDTH}&q={THUMBNAIL_PROXY_QUALITY}"
+            
+            results.append({
+                'comic_id': f"{gallery.get('gid')}_{gallery.get('token')}",
+                'title': gallery.get('title'),
+                'cover_url': gallery.get('thumbnail_proxy') or gallery.get('thumbnail'),
+                'pages': gallery.get('pages')
+            })
+        
+        has_more = result.get('pagination', {}).get('has_next', False)
+        
+        return jsonify({
+            'page': page,
+            'has_more': has_more,
+            'results': results
+        })
     except Exception as e: logging.error(f"路由 /search 出错: {e}"); return jsonify({'error': f'服务器错误: {str(e)}'}), 500
 
-@app.route('/gallery/<int:gid>/<token>')
-def gallery_detail(gid: int, token: str):
+@app.route('/comic/<id>')
+def gallery_detail(id: str):
     try:
-        headers, url_builder = get_request_context()
+        gid, token = parse_id(id)
+        if not gid or not token: return jsonify({'error': '无效的 ID 格式，应为 gid_token'}), 400
+
+        api_url = request.host_url.rstrip("/")
+        
+        headers, url_builder, default_width, default_quality = get_request_context()
         detail = get_gallery_detail_data(gid, token, tuple(headers.items()), url_builder)
         if not detail: return jsonify({'error': '无法获取画廊详情'}), 500
         detail.update({'gid': gid, 'token': token})
-        if 'thumbnail' in detail and detail['thumbnail']: detail['thumbnail_proxy'] = f"/image/proxy?url={detail['thumbnail']}&w={THUMBNAIL_PROXY_WIDTH}&q={THUMBNAIL_PROXY_QUALITY}"
-        return jsonify({'success': True, 'gallery': detail})
-    except Exception as e: logging.error(f"路由 /gallery/detail 出错: {e}"); return jsonify({'error': f'服务器错误: {str(e)}'}), 500
+        if 'thumbnail' in detail and detail['thumbnail']: detail['thumbnail_proxy'] = f"{api_url}/image/proxy?url={detail['thumbnail']}&w={THUMBNAIL_PROXY_WIDTH}&q={THUMBNAIL_PROXY_QUALITY}"
 
-@app.route('/gallery/<int:gid>/<token>/images')
-def gallery_images(gid: int, token: str):
+        print(detail)
+        
+        result = {
+            'item_id': f"{detail.get('gid')}_{detail.get('token')}",
+            'name': detail.get('title'),
+            'page_count': detail.get('pages'),
+            'rate': detail.get('rating'),
+            'cover': detail.get('thumbnail_proxy') or detail.get('thumbnail'),
+            'tags': []
+        }
+        
+        if 'tags' in detail and isinstance(detail['tags'], dict):
+            for tag_type, tag_list in detail['tags'].items():
+                if isinstance(tag_list, list):
+                    result['tags'].extend(tag_list)
+        
+        return jsonify(result)
+    except Exception as e: logging.error(f"路由 /comic 出错: {e}"); return jsonify({'error': f'服务器错误: {str(e)}'}), 500
+
+@app.route('/photo/<id>')
+@app.route('/photo/<id>/')
+@app.route('/photo/<id>/<chapter>')
+@app.route('/photo/<id>/<chapter>/')
+def gallery_images(id: str, chapter: str):
     try:
-        headers, url_builder = get_request_context()
-        page = int(request.args.get('page', '0'))
+        gid, token = parse_id(id)
+        if not gid or not token: return jsonify({'error': '无效的 ID 格式，应为 gid_token'}), 400
+        
+        headers, url_builder, default_width, default_quality = get_request_context()
+        page = int(chapter) if chapter.isdigit() else 0
         processed_images = get_gallery_images_data(gid, token, page, tuple(headers.items()), url_builder)
         if processed_images is None: return jsonify({'error': '无法获取画廊图片列表'}), 500
-        return jsonify({'success': True, 'gid': gid, 'token': token, 'page': page, 'count': len(processed_images), 'images': processed_images})
-    except Exception as e: logging.error(f"路由 /gallery/images 出错: {e}"); return jsonify({'error': f'服务器内部错误: {str(e)}'}), 500
+        
+        detail = get_gallery_detail_data(gid, token, tuple(headers.items()), url_builder)
+        title = detail.get('title', '') if detail else ''
+
+        api_url = request.host_url.rstrip("/")
+        
+        images = []
+        for img in processed_images:
+            image_url = img.get('image_jpg', '')
+            if image_url:
+                image_url = image_url.replace(f'width={DEFAULT_PROXY_WIDTH}', f'width={default_width}')
+                image_url = image_url.replace(f'quality={DEFAULT_PROXY_QUALITY}', f'quality={default_quality}')
+            images.append({'url': f"{api_url}{image_url}"})
+        
+        result = {
+            'title': title,
+            'images': images
+        }
+        
+        return jsonify(result)
+    except Exception as e: logging.error(f"路由 /photo 出错: {e}"); return jsonify({'error': f'服务器内部错误: {str(e)}'}), 500
 
 @app.route('/image/proxy')
 def image_proxy():
     image_url = request.args.get('url')
     if not image_url: return jsonify({'error': '缺少图片 URL 参数'}), 400
     try:
-        headers, _ = get_request_context()
-        max_width = int(request.args.get('w', str(DEFAULT_PROXY_WIDTH)))
-        quality = int(request.args.get('q', str(DEFAULT_PROXY_QUALITY)))
+        headers, _, default_width, default_quality = get_request_context()
+        max_width = int(request.args.get('w', request.args.get('width', str(default_width))))
+        quality = int(request.args.get('q', request.args.get('quality', str(default_quality))))
         quality = max(1, min(100, quality))
         crop_params = None
         if 'crop_x' in request.args:
@@ -438,18 +767,20 @@ def image_proxy():
     except Exception as e: logging.error(f"路由 /image/proxy 出错: {e}"); return jsonify({'error': f'服务器内部错误: {str(e)}'}), 500
 
 @app.route('/health')
-def health(): return jsonify({'status': 'ok', 'client_cookie_provided': bool(request.headers.get('X-EH-Cookie'))})
+def health(): return jsonify({'status': 'ok', 'client_cookie_provided': bool(request.headers.get('Cookie'))})
+        
 @app.get("/config")
 @app.get("/config/")
 def config():
+    api_url = request.host_url.rstrip("/")
     return jsonify(
         {
             "E-Hentai": {
                 "name": "E-Hentai",
-                "apiUrl": "https://eh-api.orpu.moe",
-                "searchPath": "/search?q=<text>&next=<page>",
-                "photoPath": "/gallery/<gid>/<token>/images?page=<page>",
-                "detailPath": "/gallery/<gid>/<token>",
+                "apiUrl": api_url,
+                "searchPath": "/search?q=<text>&page=<page>",
+                "photoPath": "/photo/<id>/<chapter>",
+                "detailPath": "/comic/<id>",
                 "type": "ehentai",
             },
         }
@@ -458,5 +789,5 @@ def config():
 @app.errorhandler(404)
 def not_found(error): return jsonify({'error': '未找到请求的资源'}), 404
 
-# Gunicorn 会从此文件加载 app 对象，因此不再需要 if __name__ == "__main__": 块
-# 日志配置由 Gunicorn 和 PM2 接管
+if __name__ == "__main__":
+    app.run(host="0.0.0.0", port=8000)
