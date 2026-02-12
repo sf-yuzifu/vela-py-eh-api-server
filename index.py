@@ -341,7 +341,6 @@ def get_gallery_images_data(gid: int, token: str, page: int, headers: tuple, url
             image_url = EhParser.parse_image_page(page_html)
             if image_url:
                 return preview_item['index'], image_url
-        # 如果获取或解析失败，返回 None
         logging.warning(f"无法从 {preview_item['page_url']} 获取最终图片链接。")
         return preview_item['index'], None
 
@@ -354,7 +353,7 @@ def get_gallery_images_data(gid: int, token: str, page: int, headers: tuple, url
                 if image_url:
                     crop_info = f"&crop_x={original_item['crop_x']}&crop_y={original_item['crop_y']}&crop_w={original_item['crop_w']}&crop_h={original_item['crop_h']}"
                     thumbnail_proxy_url = f"/image/proxy?url={original_item['thumbnail_url']}{crop_info}&w={THUMBNAIL_PROXY_WIDTH}&q={THUMBNAIL_PROXY_QUALITY}"
-                    final_images[index] = {'index': index, 'thumbnail_jpg': thumbnail_proxy_url, 'image_jpg': f"/image/proxy?url={image_url}&width={DEFAULT_PROXY_WIDTH}&quality={DEFAULT_PROXY_QUALITY}"}
+                    final_images[index] = {'index': index, 'thumbnail_jpg': thumbnail_proxy_url, 'image_jpg': f"/image/proxy?url={image_url}"}
             except Exception as exc: logging.error(f"并发任务生成异常: {exc}")
     return [img for img in final_images if img is not None]
 
@@ -760,9 +759,7 @@ def gallery_images(id: str, chapter: str):
         for img in processed_images:
             image_url = img.get('image_jpg', '')
             if image_url:
-                image_url = image_url.replace(f'width={DEFAULT_PROXY_WIDTH}', f'width={default_width}')
-                image_url = image_url.replace(f'quality={DEFAULT_PROXY_QUALITY}', f'quality={default_quality}')
-            images.append({'url': f"{api_url}{image_url}"})
+                images.append({'url': f"{api_url}{image_url}"})
         
         result = {
             'title': title,
@@ -777,9 +774,9 @@ def image_proxy():
     image_url = request.args.get('url')
     if not image_url: return jsonify({'error': '缺少图片 URL 参数'}), 400
     try:
-        headers, _, default_width, default_quality = get_request_context()
-        max_width = int(request.args.get('w', request.args.get('width', str(default_width))))
-        quality = int(request.args.get('q', request.args.get('quality', str(default_quality))))
+        headers, _, _, _ = get_request_context()
+        max_width = int(request.args.get('w', request.args.get('width', '400')))
+        quality = int(request.args.get('q', request.args.get('quality', '50')))
         quality = max(1, min(100, quality))
         crop_params = None
         if 'crop_x' in request.args:
