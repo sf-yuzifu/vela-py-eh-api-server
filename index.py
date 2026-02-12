@@ -646,7 +646,7 @@ def search():
     try:
         headers, url_builder, default_width, default_quality = get_request_context()
         search_keyword = request.args.get('q', '')
-        page = int(request.args.get('page', 1))
+        page = int(request.args.get('page', 1) or 1)
 
         keyword = decode_search_value(search_keyword)
         print(f"原始值: {search_keyword}, 解码后: {keyword}")
