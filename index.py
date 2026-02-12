@@ -19,7 +19,7 @@ import sys
 import requests
 import logging
 from flask import Flask, request, jsonify, Response, render_template_string
-from urllib.parse import urlencode, quote
+from urllib.parse import urlencode, quote, unquote
 from typing import List, Dict, Optional, Tuple
 from bs4 import BeautifulSoup
 from PIL import Image
@@ -36,6 +36,32 @@ pagination_cache = TTLCache(maxsize=200, ttl=600)
 
 import sys
 sys.stdout.reconfigure(encoding="utf-8")
+
+def decode_search_value(value: str) -> str:
+    """
+    判断并解码搜索值
+    如果值是URL编码，则解码为中文，否则直接返回
+    """
+    # URL编码的特征：包含%后跟两个十六进制字符
+    url_encoded_pattern = r"%[0-9A-Fa-f]{2}"
+
+    # 如果包含URL编码特征，尝试解码
+    if re.search(url_encoded_pattern, value):
+        try:
+            decoded = unquote(value)
+            # 解码后如果还包含URL编码特征，说明可能有多重编码，继续解码
+            while re.search(url_encoded_pattern, decoded):
+                temp = unquote(decoded)
+                if temp == decoded:  # 如果没有变化，停止解码
+                    break
+                decoded = temp
+            return decoded
+        except Exception:
+            # 如果解码失败，返回原值
+            return value
+    else:
+        # 没有URL编码特征，直接返回
+        return value
 
 # ==============================================================================
 # 模块 1: E-Hentai HTML 解析器 (EhParser)
@@ -619,8 +645,11 @@ def home():
 def search():
     try:
         headers, url_builder, default_width, default_quality = get_request_context()
-        keyword = request.args.get('q', '')
+        search_keyword = request.args.get('q', '')
         page = int(request.args.get('page', 1))
+
+        keyword = decode_search_value(search_keyword)
+        print(f"原始值: {search_keyword}, 解码后: {keyword}")
         
         if not keyword: return jsonify({'error': '缺少搜索关键词参数 q'}), 400
         
