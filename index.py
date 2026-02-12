@@ -427,7 +427,7 @@ def get_image_params_for_device(device_info: dict) -> tuple:
 
 def get_request_context() -> tuple:
     client_cookie = request.headers.get('Cookie')
-    use_exhentai = bool(client_cookie and 'igneous=EX' in client_cookie)
+    use_exhentai = bool(client_cookie and 'igneous' in client_cookie)
     url_builder = EhUrlBuilder(use_exhentai=use_exhentai)
     
     user_agent = request.headers.get('User-Agent', '')
