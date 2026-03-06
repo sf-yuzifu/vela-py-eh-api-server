@@ -444,8 +444,20 @@ def fetch_page_for_request(url: str, headers: dict) -> Optional[str]:
         response.raise_for_status()
         return response.text
     except requests.RequestException as e:
-        logging.error(f"请求 E-Hentai 失败: {e}, URL: {url}")
-        return None
+        if 'exhentai.org' in url:
+            logging.warning(f"ExHentai 请求失败，尝试回退到 E-Hentai: {e}, URL: {url}")
+            fallback_url = url.replace('exhentai.org', 'e-hentai.org')
+            try:
+                response = requests.get(fallback_url, headers=headers, timeout=REQUEST_TIMEOUT)
+                response.raise_for_status()
+                logging.info(f"成功回退到 E-Hentai: {fallback_url}")
+                return response.text
+            except requests.RequestException as fallback_e:
+                logging.error(f"E-Hentai 回退也失败: {fallback_e}, URL: {fallback_url}")
+                return None
+        else:
+            logging.error(f"请求 E-Hentai 失败: {e}, URL: {url}")
+            return None
 
 @app.route('/test')
 def test_page():
