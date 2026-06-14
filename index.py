@@ -16,6 +16,7 @@
 import re
 import io
 import sys
+import struct
 import requests
 import logging
 from flask import Flask, request, jsonify, Response, render_template_string
@@ -263,7 +264,56 @@ class EhUrlBuilder:
 # ==============================================================================
 class ImageProcessor:
     @staticmethod
-    def process_and_compress(image_bytes: bytes, max_width: int, quality: int, crop_params: Optional[Dict] = None) -> Optional[Tuple[bytes, dict]]:
+    def is_truthy(value: str) -> bool:
+        return value in ("1", "true", "True", "yes", "on")
+
+    @staticmethod
+    def normalize_rgb_image(img: Image.Image) -> Image.Image:
+        if img.mode in ("RGBA", "LA", "P"):
+            background = Image.new("RGB", img.size, (255, 255, 255))
+            if img.mode in ("RGBA", "LA"):
+                background.paste(img, mask=img.split()[-1])
+            else:
+                background.paste(img)
+            return background
+        if img.mode != "RGB":
+            return img.convert("RGB")
+        return img
+
+    @staticmethod
+    def optimize_png_image(img: Image.Image, quality: int) -> Image.Image:
+        quality = max(1, min(100, quality))
+        img = ImageProcessor.normalize_rgb_image(img)
+        if quality >= 95:
+            return img
+        colors = max(16, min(256, int(16 + quality * 2.4)))
+        return img.quantize(colors=colors, method=Image.Quantize.MEDIANCUT)
+
+    @staticmethod
+    def convert_to_lvgl8(img: Image.Image) -> bytes:
+        img = ImageProcessor.normalize_rgb_image(img)
+        img = img.quantize(colors=256, method=Image.Quantize.MEDIANCUT)
+        w, h = img.size
+
+        raw_palette = img.getpalette()
+        palette = []
+        for i in range(256):
+            idx = i * 3
+            if idx + 2 < len(raw_palette):
+                palette.append((raw_palette[idx], raw_palette[idx + 1], raw_palette[idx + 2]))
+            else:
+                palette.append((0, 0, 0))
+
+        header_word1 = 10 | (w << 10) | (h << 21)
+        output = io.BytesIO()
+        output.write(struct.pack("<I", header_word1))
+        for r, g, b in palette:
+            output.write(bytes([b, g, r, 0xFF]))
+        output.write(img.tobytes())
+        return output.getvalue()
+
+    @staticmethod
+    def process_and_compress(image_bytes: bytes, max_width: int, quality: int, crop_params: Optional[Dict] = None, output_format: str = "jpeg") -> Optional[Tuple[bytes, dict]]:
         try:
             img = Image.open(io.BytesIO(image_bytes))
             if crop_params:
@@ -274,18 +324,23 @@ class ImageProcessor:
             if original_width > max_width:
                 ratio = max_width / original_width; new_height = int(original_height * ratio)
                 img = img.resize((max_width, new_height), Image.Resampling.LANCZOS)
-            if img.mode in ("RGBA", "P"):
-                background = Image.new("RGB", img.size, (255, 255, 255))
-                if img.mode == "RGBA": background.paste(img, mask=img.split()[-1])
-                else: background.paste(img)
-                img = background
-            elif img.mode != "RGB": img = img.convert("RGB")
             output = io.BytesIO()
-            optimize_options = {"quality": quality, "optimize": True, "progressive": True}
-            img.save(output, "JPEG", **optimize_options)
-            compressed_bytes = output.getvalue()
-            info = {"original_size": f"{original_width}x{original_height}", "compressed_size": f"{img.width}x{img.height}", "file_size": len(compressed_bytes)}
-            return compressed_bytes, info
+            if output_format == "lvgl":
+                processed_bytes = ImageProcessor.convert_to_lvgl8(img)
+                content_type = "application/octet-stream"
+            elif output_format == "png":
+                img = ImageProcessor.optimize_png_image(img, quality)
+                img.save(output, "PNG", optimize=True, compress_level=9)
+                processed_bytes = output.getvalue()
+                content_type = "image/png"
+            else:
+                img = ImageProcessor.normalize_rgb_image(img)
+                optimize_options = {"quality": quality, "optimize": True, "progressive": True}
+                img.save(output, "JPEG", **optimize_options)
+                processed_bytes = output.getvalue()
+                content_type = "image/jpeg"
+            info = {"original_size": f"{original_width}x{original_height}", "compressed_size": f"{img.width}x{img.height}", "file_size": len(processed_bytes), "content_type": content_type}
+            return processed_bytes, info
         except Exception as e: logging.error(f"图片处理失败: {e}"); return None
 
 # ==============================================================================
@@ -359,14 +414,14 @@ def get_gallery_images_data(gid: int, token: str, page: int, headers: tuple, url
 
 
 @cached(cache=image_proxy_cache)
-def get_processed_image_data(url: str, headers: tuple, max_width: int, quality: int, crop_params: Optional[tuple] = None):
+def get_processed_image_data(url: str, headers: tuple, max_width: int, quality: int, crop_params: Optional[tuple] = None, output_format: str = "jpeg"):
     logging.info(f"图片缓存未命中或已过期，正在处理图片: {url}")
     try:
         response = requests.get(url, headers=dict(headers), timeout=REQUEST_TIMEOUT)
         response.raise_for_status()
         crop_dict = None
         if crop_params: crop_dict = {'x': crop_params[0], 'y': crop_params[1], 'w': crop_params[2], 'h': crop_params[3]}
-        result = ImageProcessor.process_and_compress(image_bytes=response.content, max_width=max_width, quality=quality, crop_params=crop_dict)
+        result = ImageProcessor.process_and_compress(image_bytes=response.content, max_width=max_width, quality=quality, crop_params=crop_dict, output_format=output_format)
         return result
     except requests.RequestException as e: logging.error(f"下载原始图片失败: {e}"); return None
     except Exception as e: logging.error(f"处理图片时发生未知错误: {e}"); return None
@@ -737,7 +792,8 @@ def gallery_detail(id: str):
             'page_count': detail.get('pages'),
             'rate': detail.get('rating'),
             'cover': detail.get('thumbnail_proxy') or detail.get('thumbnail'),
-            'tags': []
+            'tags': [],
+            'total_chapters': 1
         }
         
         if 'tags' in detail and isinstance(detail['tags'], dict):
@@ -786,22 +842,27 @@ def image_proxy():
     image_url = request.args.get('url')
     if not image_url: return jsonify({'error': '缺少图片 URL 参数'}), 400
     try:
-        headers, _, _, _ = get_request_context()
-        max_width = int(request.args.get('w', request.args.get('width', '400')))
-        quality = int(request.args.get('q', request.args.get('quality', '50')))
+        headers, _, default_width, default_quality = get_request_context()
+        max_width = int(request.args.get('width') or request.args.get('w') or default_width)
+        quality = int(request.args.get('quality') or request.args.get('q') or default_quality)
         quality = max(1, min(100, quality))
+        output_format = 'jpeg'
+        if ImageProcessor.is_truthy(request.args.get('ifLVGL', '0')):
+            output_format = 'lvgl'
+        elif ImageProcessor.is_truthy(request.args.get('ifPNG', '0')):
+            output_format = 'png'
         crop_params = None
         if 'crop_x' in request.args:
             try:
                 crop_params = (int(request.args['crop_x']), int(request.args['crop_y']), int(request.args['crop_w']), int(request.args['crop_h']))
             except (ValueError, KeyError): return jsonify({'error': '无效的切割参数'}), 400
         
-        result = get_processed_image_data(image_url, tuple(headers.items()), max_width, quality, crop_params)
+        result = get_processed_image_data(image_url, tuple(headers.items()), max_width, quality, crop_params, output_format)
         if not result: return jsonify({'error': '无法下载或处理图片'}), 500
         
-        compressed_bytes, info = result
-        response_headers = {"Content-Disposition": "inline", "Content-Length": str(info['file_size']), "X-Image-Original-Size": info['original_size'], "X-Image-Compressed-Size": info['compressed_size'], "Cache-Control": "public, max-age=86400"}
-        return Response(compressed_bytes, mimetype="image/jpeg", headers=response_headers)
+        image_bytes, info = result
+        response_headers = {"Content-Disposition": "inline", "Content-Length": str(info['file_size']), "X-Image-Original-Size": info['original_size'], "X-Image-Compressed-Size": info['compressed_size'], "Cache-Control": "public, max-age=86400", "Content-Type": info['content_type']}
+        return Response(image_bytes, mimetype=info['content_type'], headers=response_headers)
     except Exception as e: logging.error(f"路由 /image/proxy 出错: {e}"); return jsonify({'error': f'服务器内部错误: {str(e)}'}), 500
 
 @app.route('/health')
