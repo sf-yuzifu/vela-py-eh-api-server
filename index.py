@@ -16,6 +16,7 @@
 import re
 import io
 import sys
+import math
 import struct
 import requests
 import logging
@@ -376,9 +377,9 @@ def get_gallery_detail_data(gid: int, token: str, headers: tuple, url_builder: '
     return parsed_data
 
 @cached(cache=gallery_cache)
-def get_gallery_images_data(gid: int, token: str, page: int, headers: tuple, url_builder: 'EhUrlBuilder'):
+def get_gallery_images_data(gid: int, token: str, page: int, headers: tuple, url_builder: 'EhUrlBuilder', start_index: int = 0, limit: Optional[int] = None):
     url = f"{url_builder.build_gallery_url(gid=gid, token=token)}?p={page}"
-    logging.info(f"缓存未命中或已过期，正在抓取图片列表并并发解析所有大图: {url}")
+    logging.info(f"缓存未命中或已过期，正在抓取图片列表并解析指定范围大图: {url}")
     preview_html = fetch_page_for_request(url, dict(headers))
     if not preview_html:
         return None
@@ -386,21 +387,25 @@ def get_gallery_images_data(gid: int, token: str, page: int, headers: tuple, url
     preview_list = EhParser.parse_preview_images(preview_html)
     if not preview_list:
         logging.warning(f"画廊图片预览页 {url} 解析结果为空列表。")
-        # EhParser 内部已记录 HTML，这里返回空列表是符合预期的
         return []
 
+    if limit is not None:
+        preview_list = preview_list[start_index:start_index + limit]
+    elif start_index > 0:
+        preview_list = preview_list[start_index:]
+
     final_images = [None] * len(preview_list)
-    def fetch_and_parse_image_url(preview_item):
+    def fetch_and_parse_image_url(position, preview_item):
         page_html = fetch_page_for_request(preview_item['page_url'], dict(headers))
         if page_html:
             image_url = EhParser.parse_image_page(page_html)
             if image_url:
-                return preview_item['index'], image_url
+                return position, image_url
         logging.warning(f"无法从 {preview_item['page_url']} 获取最终图片链接。")
-        return preview_item['index'], None
+        return position, None
 
     with ThreadPoolExecutor(max_workers=MAX_CONCURRENT_REQUESTS) as executor:
-        future_to_url = {executor.submit(fetch_and_parse_image_url, item): item for item in preview_list}
+        future_to_url = {executor.submit(fetch_and_parse_image_url, index, item): item for index, item in enumerate(preview_list)}
         for future in as_completed(future_to_url):
             original_item = future_to_url[future]
             try:
@@ -411,6 +416,29 @@ def get_gallery_images_data(gid: int, token: str, page: int, headers: tuple, url
                     final_images[index] = {'index': index, 'thumbnail_jpg': thumbnail_proxy_url, 'image_jpg': f"/image/proxy?url={image_url}"}
             except Exception as exc: logging.error(f"并发任务生成异常: {exc}")
     return [img for img in final_images if img is not None]
+
+
+def get_virtual_chapter_images_data(gid: int, token: str, chapter: int, headers: tuple, url_builder: 'EhUrlBuilder'):
+    chapter = max(1, chapter)
+    start = (chapter - 1) * VIRTUAL_CHAPTER_SIZE
+    remaining = VIRTUAL_CHAPTER_SIZE
+    eh_page = start // EH_PREVIEW_PAGE_SIZE
+    offset = start % EH_PREVIEW_PAGE_SIZE
+    images = []
+
+    while remaining > 0:
+        page_limit = min(remaining, EH_PREVIEW_PAGE_SIZE - offset)
+        page_images = get_gallery_images_data(gid, token, eh_page, headers, url_builder, offset, page_limit)
+        if page_images is None:
+            return None
+        images.extend(page_images)
+        if len(page_images) < page_limit:
+            break
+        remaining -= len(page_images)
+        eh_page += 1
+        offset = 0
+
+    return images
 
 
 @cached(cache=image_proxy_cache)
@@ -435,6 +463,8 @@ app.debug = False
 REQUEST_TIMEOUT = 20; DEFAULT_PROXY_WIDTH = 400; DEFAULT_PROXY_QUALITY = 50
 THUMBNAIL_PROXY_WIDTH = 150; THUMBNAIL_PROXY_QUALITY = 40
 MAX_CONCURRENT_REQUESTS = 10
+EH_PREVIEW_PAGE_SIZE = 40
+VIRTUAL_CHAPTER_SIZE = 20
 
 def parse_user_agent(user_agent: str) -> dict:
     device_info = {'product': '', 'brand': '', 'os_type': '', 'os_version': ''}
@@ -786,14 +816,17 @@ def gallery_detail(id: str):
 
         print(detail)
         
+        total_pages = detail.get('pages') or 0
+        total_chapters = max(1, math.ceil(total_pages / VIRTUAL_CHAPTER_SIZE))
+
         result = {
             'item_id': f"{detail.get('gid')}_{detail.get('token')}",
             'name': detail.get('title'),
-            'page_count': detail.get('pages'),
+            'page_count': total_pages,
             'rate': detail.get('rating'),
             'cover': detail.get('thumbnail_proxy') or detail.get('thumbnail'),
             'tags': [],
-            'total_chapters': 1
+            'total_chapters': total_chapters
         }
         
         if 'tags' in detail and isinstance(detail['tags'], dict):
@@ -808,18 +841,28 @@ def gallery_detail(id: str):
 @app.route('/photo/<id>/')
 @app.route('/photo/<id>/<chapter>')
 @app.route('/photo/<id>/<chapter>/')
-def gallery_images(id: str, chapter: str):
+def gallery_images(id: str, chapter: str = "1"):
     try:
         gid, token = parse_id(id)
         if not gid or not token: return jsonify({'error': '无效的 ID 格式，应为 gid_token'}), 400
         
         headers, url_builder, default_width, default_quality = get_request_context()
-        page = int(chapter) if chapter.isdigit() else 0
-        processed_images = get_gallery_images_data(gid, token, page, tuple(headers.items()), url_builder)
+        chapter_num = int(chapter) if chapter and chapter.isdigit() else 1
+        if chapter_num < 1:
+            return jsonify({'error': '章节编号必须从 1 开始'}), 400
+
+        detail = get_gallery_detail_data(gid, token, tuple(headers.items()), url_builder)
+        total_pages = (detail.get('pages') or 0) if detail else 0
+        total_chapters = max(1, math.ceil(total_pages / VIRTUAL_CHAPTER_SIZE))
+        if chapter_num > total_chapters:
+            return jsonify({'error': '章节不存在'}), 404
+
+        processed_images = get_virtual_chapter_images_data(gid, token, chapter_num, tuple(headers.items()), url_builder)
         if processed_images is None: return jsonify({'error': '无法获取画廊图片列表'}), 500
         
-        detail = get_gallery_detail_data(gid, token, tuple(headers.items()), url_builder)
         title = detail.get('title', '') if detail else ''
+        if total_chapters > 1:
+            title = f"{title} - Part {chapter_num}"
 
         api_url = request.host_url.rstrip("/")
         

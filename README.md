@@ -13,12 +13,15 @@
   - 图片代理缓存 (24小时)
   - 分页游标缓存 (10分钟)
 - **专为嵌入式优化**:
-    - 一次性返回所有图片链接，杜绝客户端二次请求。
-    - 所有图片（包括缩略图）均在服务器端处理为 **JPEG** 格式。
+    - 一次性返回当前虚拟章节的图片链接，避免手表端二次解析页面。
+    - E-Hentai 单篇画廊会按每 20 张图片拆分为虚拟章节，降低大画廊首屏等待和服务端压力。
+    - 图片在服务器端统一代理、缩放、压缩和转码，适配低功耗设备。
     - 服务器端实现雪碧图（Sprite Sheet）的精确切割。
 - **强大的图片处理**:
     - 支持动态调整图片宽度和压缩质量。
-    - 强制将 WebP 等格式转换为兼容性更强的 JPEG。
+    - 支持 JPEG、PNG 和 LVGL 预解码二进制输出。
+    - 支持 `ifLVGL=1`、`ifPNG=1` 参数，优先级为 `ifLVGL > ifPNG > JPEG`。
+    - 强制将 WebP 等格式转换为快应用更易处理的格式。
     - 根据设备 User-Agent 自动调整图片参数。
 - **智能分页**: 服务器端缓存游标，客户端只需传递页数即可翻页。
 - **符合漫画源规范**: 完全符合自定义漫画源标准，可直接集成到漫画阅读应用。
@@ -115,6 +118,8 @@ packageName(versionName(versionCode))/product/brand/osType/osVersionName/osVersi
 - **手机设备**: 宽度 400px，质量 50
 - **其他设备**: 默认宽度 400px，质量 50
 
+图片接口也支持客户端显式传入 `width` / `quality` 参数覆盖默认值。为了兼容旧调用方式，也同时支持 `w` / `q`。
+
 ---
 
 ### 1. 获取漫画源配置
@@ -187,10 +192,11 @@ packageName(versionName(versionCode))/product/brand/osType/osVersionName/osVersi
 {
   "item_id": "3645215_4db836130d",
   "name": "[Chinese] 画廊标题",
-  "page_count": 25,
+  "page_count": 233,
   "rate": 4.5,
   "cover": "https://your-api-domain.com/image/proxy?url=...&w=150&q=40",
-  "tags": ["chinese", "translated", "artist_name", "big breasts", "sole female", "sole male"]
+  "tags": ["chinese", "translated", "artist_name", "big breasts", "sole female", "sole male"],
+  "total_chapters": 12
 }
 ```
 
@@ -200,53 +206,67 @@ packageName(versionName(versionCode))/product/brand/osType/osVersionName/osVersi
 
 **必选参数**:
 `id`: 漫画 ID，格式为 `gid_token`。
-`chapter`: 章节（页码），从 0 开始。
+`chapter`: 虚拟章节编号，从 1 开始。服务端按每 20 张图片拆分一个虚拟章节。
 
 **接口地址**: `/photo/<id>/<chapter>`
 
 **调用例子**:
-- 获取第一页图片: `/photo/3645215_4db836130d/0`
-- 获取第二页图片: `/photo/3645215_4db836130d/1`
+- 获取第 1 个虚拟章节（第 1-20 张）: `/photo/3645215_4db836130d/1`
+- 获取第 2 个虚拟章节（第 21-40 张）: `/photo/3645215_4db836130d/2`
 
 **返回示例**:
 ```json
 {
-  "title": "[Chinese] 画廊标题",
+  "title": "[Chinese] 画廊标题 - Part 1",
   "images": [
     {
-      "url": "https://your-api-domain.com/image/proxy?url=...&width=400&quality=50"
+      "url": "https://your-api-domain.com/image/proxy?url=..."
     },
     {
-      "url": "https://your-api-domain.com/image/proxy?url=...&width=400&quality=50"
+      "url": "https://your-api-domain.com/image/proxy?url=..."
     }
   ]
 }
 ```
 
-> **说明**: 图片 URL 中的 `width` 和 `quality` 参数会根据设备 User-Agent 自动调整。
+> **说明**: 图片列表只返回基础代理 URL，腕上漫画快应用会在实际请求图片时追加 `width`、`quality`、`ifPNG`、`ifLVGL` 等参数。
 
 ---
 
 ### 5. 图片代理服务
 
-**说明**: 此接口用于获取经过服务器处理（切割、压缩、转码）后的 JPEG 图片。
+**说明**: 此接口用于获取经过服务器处理（切割、缩放、压缩、转码）后的图片或 LVGL 预解码二进制。
 
 **必选参数**:
 `url`: 原始图片 URL。
 
 **可选参数**:
-- `w` 或 `width`: 图片最大宽度。默认根据设备自动调整。
-- `q` 或 `quality`: JPEG 压缩质量 (1-100)。默认根据设备自动调整。
+- `width` 或 `w`: 图片最大宽度。默认根据设备自动调整。
+- `quality` 或 `q`: 图片质量，范围 1-100。默认根据设备自动调整。
+- `ifPNG`: 为 `1`、`true`、`True`、`yes`、`on` 时返回 PNG。
+- `ifLVGL`: 为 `1`、`true`、`True`、`yes`、`on` 时返回 LVGL 预解码二进制。
 - `crop_x`, `crop_y`, `crop_w`, `crop_h`: 用于切割雪碧图的参数。
+
+**输出优先级**:
+
+```text
+ifLVGL=1 > ifPNG=1 > 默认 JPEG
+```
+
+也就是说，同时传入 `ifPNG=1&ifLVGL=1` 时，接口会返回 LVGL 二进制，而不是 PNG。
 
 **接口地址**: `/image/proxy`
 
 **调用例子**:
 - 代理大图: `/image/proxy?url=https://.../image.webp`
 - 指定宽度和质量: `/image/proxy?url=https://.../image.webp&width=600&quality=60`
+- 返回 PNG: `/image/proxy?url=https://.../image.webp&width=600&quality=60&ifPNG=1`
+- 返回 LVGL 二进制: `/image/proxy?url=https://.../image.webp&width=600&quality=60&ifLVGL=1`
 
 **返回内容**:
-- **成功**: 返回 `Content-Type: image/jpeg` 的图片二进制数据。
+- **默认**: 返回 `Content-Type: image/jpeg` 的图片二进制数据。
+- **开启 `ifPNG`**: 返回 `Content-Type: image/png` 的图片二进制数据。
+- **开启 `ifLVGL`**: 返回 `Content-Type: application/octet-stream` 的 LVGL 预解码二进制数据。
 - **失败**: 返回 `Content-Type: application/json` 的错误信息。
 
 ---
