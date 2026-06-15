@@ -92,6 +92,15 @@ def is_chinese_locale(device_info: dict) -> bool:
     return language.startswith('zh') or region in ('CN', 'TW', 'HK', 'MO') or 'zh' in accept_language
 
 
+def clean_tag_translation_text(text: str) -> str:
+    text = re.sub(r'!\[[^\]]*\]\([^)]*\)', '', text)
+    text = re.sub(r'\[([^\]]+)\]\([^)]*\)', r'\1', text)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = text.replace('`', '')
+    text = re.sub(r'[\U0001F000-\U0001FAFF\U00002700-\U000027BF\U00002600-\U000026FF]', '', text)
+    return text.strip()
+
+
 def parse_tag_translation_markdown(text: str) -> Dict[str, str]:
     translations = {}
     for line in text.splitlines():
@@ -101,7 +110,7 @@ def parse_tag_translation_markdown(text: str) -> Dict[str, str]:
         columns = [column.strip() for column in line.strip('|').split('|')]
         if len(columns) < 2:
             continue
-        raw_tag, translated_name = columns[0].strip('` '), columns[1].strip()
+        raw_tag, translated_name = columns[0].strip('` '), clean_tag_translation_text(columns[1])
         if raw_tag and translated_name and not translated_name.startswith('=='):
             translations[raw_tag.lower()] = translated_name
     return translations
