@@ -24,6 +24,7 @@
     - 强制将 WebP 等格式转换为快应用更易处理的格式。
     - 根据设备 User-Agent 自动调整图片参数。
 - **智能分页**: 服务器端缓存游标，客户端只需传递页数即可翻页。
+- **标签汉化**: 根据腕上漫画 User-Agent 中的 `language/region` 判断中文环境，并通过 EhTagTranslation 数据库汉化分类和标签。
 - **符合漫画源规范**: 完全符合自定义漫画源标准，可直接集成到漫画阅读应用。
 - **易于部署**: 提供详细的手动部署指南和一键安装脚本。
 
@@ -120,6 +121,8 @@ packageName(versionName(versionCode))/product/brand/osType/osVersionName/osVersi
 
 图片接口也支持客户端显式传入 `width` / `quality` 参数覆盖默认值。为了兼容旧调用方式，也同时支持 `w` / `q`。
 
+当 User-Agent 中的 `language` 为 `zh` 开头，或 `region` 为 `CN` / `TW` / `HK` / `MO` 时，详情接口会使用 [EhTagTranslation/Database](https://github.com/EhTagTranslation/Database) 汉化分类和标签；非中文环境保持 E-Hentai 原始标签。
+
 ---
 
 ### 1. 获取漫画源配置
@@ -195,7 +198,7 @@ packageName(versionName(versionCode))/product/brand/osType/osVersionName/osVersi
   "page_count": 233,
   "rate": 4.5,
   "cover": "https://your-api-domain.com/image/proxy?url=...&w=150&q=40",
-  "tags": ["chinese", "translated", "artist_name", "big breasts", "sole female", "sole male"],
+  "tags": ["漫画", "汉语", "已翻译", "巨乳", "单女主", "单男主"],
   "total_chapters": 12
 }
 ```

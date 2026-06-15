@@ -35,6 +35,7 @@ list_cache = TTLCache(maxsize=100, ttl=300 )
 gallery_cache = TTLCache(maxsize=500, ttl=3600)
 image_proxy_cache = TTLCache(maxsize=1000, ttl=86400)
 pagination_cache = TTLCache(maxsize=200, ttl=600)
+tag_translation_cache = TTLCache(maxsize=32, ttl=86400)
 
 import sys
 sys.stdout.reconfigure(encoding="utf-8")
@@ -64,6 +65,91 @@ def decode_search_value(value: str) -> str:
     else:
         # 没有URL编码特征，直接返回
         return value
+
+
+TAG_TRANSLATION_BASE_URL = "https://raw.githubusercontent.com/EhTagTranslation/Database/master/database"
+TAG_NAMESPACE_FILES = {
+    "artist": "artist.md",
+    "character": "character.md",
+    "cosplayer": "cosplayer.md",
+    "female": "female.md",
+    "group": "group.md",
+    "language": "language.md",
+    "location": "location.md",
+    "male": "male.md",
+    "mixed": "mixed.md",
+    "misc": "mixed.md",
+    "other": "other.md",
+    "parody": "parody.md",
+    "reclass": "reclass.md",
+}
+
+
+def is_chinese_locale(device_info: dict) -> bool:
+    language = (device_info.get('language') or '').lower()
+    region = (device_info.get('region') or '').upper()
+    accept_language = request.headers.get('Accept-Language', '').lower()
+    return language.startswith('zh') or region in ('CN', 'TW', 'HK', 'MO') or 'zh' in accept_language
+
+
+def parse_tag_translation_markdown(text: str) -> Dict[str, str]:
+    translations = {}
+    for line in text.splitlines():
+        line = line.strip()
+        if not line.startswith('|') or line.startswith('| ---') or '原始标签' in line:
+            continue
+        columns = [column.strip() for column in line.strip('|').split('|')]
+        if len(columns) < 2:
+            continue
+        raw_tag, translated_name = columns[0].strip('` '), columns[1].strip()
+        if raw_tag and translated_name and not translated_name.startswith('=='):
+            translations[raw_tag.lower()] = translated_name
+    return translations
+
+
+@cached(cache=tag_translation_cache)
+def get_tag_translation_map(namespace: str) -> Dict[str, str]:
+    filename = TAG_NAMESPACE_FILES.get(namespace.lower())
+    if not filename:
+        return {}
+    url = f"{TAG_TRANSLATION_BASE_URL}/{filename}"
+    try:
+        response = requests.get(url, timeout=REQUEST_TIMEOUT)
+        response.raise_for_status()
+        return parse_tag_translation_markdown(response.text)
+    except Exception as e:
+        logging.warning(f"加载 EhTagTranslation 数据失败: {namespace}, {e}")
+        return {}
+
+
+def translate_eh_tag(namespace: str, tag: str) -> str:
+    tag_text = tag.strip()
+    if not tag_text:
+        return tag
+    translations = get_tag_translation_map(namespace.lower())
+    return translations.get(tag_text.lower(), tag_text)
+
+
+def translate_eh_category(category: str) -> str:
+    if not category:
+        return category
+    return translate_eh_tag('reclass', category.replace(' ', '').lower()) or category
+
+
+def flatten_eh_tags(detail: dict, translate: bool = False) -> List[str]:
+    result = []
+    category = detail.get('category')
+    if category:
+        result.append(translate_eh_category(category) if translate else category)
+
+    tags = detail.get('tags')
+    if isinstance(tags, dict):
+        for tag_type, tag_list in tags.items():
+            namespace = tag_type.lower().strip()
+            if isinstance(tag_list, list):
+                for tag in tag_list:
+                    result.append(translate_eh_tag(namespace, tag) if translate else tag)
+    return result
 
 # ==============================================================================
 # 模块 1: E-Hentai HTML 解析器 (EhParser)
@@ -467,7 +553,7 @@ EH_PREVIEW_PAGE_SIZE = 20
 VIRTUAL_CHAPTER_SIZE = 20
 
 def parse_user_agent(user_agent: str) -> dict:
-    device_info = {'product': '', 'brand': '', 'os_type': '', 'os_version': ''}
+    device_info = {'product': '', 'brand': '', 'os_type': '', 'os_version': '', 'language': '', 'region': ''}
     try:
         if not user_agent:
             return device_info
@@ -478,6 +564,8 @@ def parse_user_agent(user_agent: str) -> dict:
             device_info['brand'] = parts[2] if len(parts) > 2 else ''
             device_info['os_type'] = parts[3] if len(parts) > 3 else ''
             device_info['os_version'] = parts[4] if len(parts) > 4 else ''
+            device_info['language'] = parts[6] if len(parts) > 6 else ''
+            device_info['region'] = parts[7] if len(parts) > 7 else ''
     except Exception as e:
         logging.warning(f"解析 User-Agent 失败: {e}")
     
@@ -819,20 +907,16 @@ def gallery_detail(id: str):
         total_pages = detail.get('pages') or 0
         total_chapters = max(1, math.ceil(total_pages / VIRTUAL_CHAPTER_SIZE))
 
+        translate_tags = is_chinese_locale(parse_user_agent(request.headers.get('User-Agent', '')))
         result = {
             'item_id': f"{detail.get('gid')}_{detail.get('token')}",
             'name': detail.get('title'),
             'page_count': total_pages,
             'rate': detail.get('rating'),
             'cover': detail.get('thumbnail_proxy') or detail.get('thumbnail'),
-            'tags': [],
+            'tags': flatten_eh_tags(detail, translate=translate_tags),
             'total_chapters': total_chapters
         }
-        
-        if 'tags' in detail and isinstance(detail['tags'], dict):
-            for tag_type, tag_list in detail['tags'].items():
-                if isinstance(tag_list, list):
-                    result['tags'].extend(tag_list)
         
         return jsonify(result)
     except Exception as e: logging.error(f"路由 /comic 出错: {e}"); return jsonify({'error': f'服务器错误: {str(e)}'}), 500
